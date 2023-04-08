@@ -26,6 +26,9 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+from torch.utils.tensorboard import SummaryWriter
+import torchinfo
+
 
 from model import GPTConfig, GPT
 
@@ -41,7 +44,7 @@ always_save_checkpoint = True # if True, always save a checkpoint after each eva
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = False # disabled by default
-wandb_project = 'owt'
+wandb_project = 'nanogpt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset = 'openwebtext'
@@ -94,9 +97,28 @@ else:
     seed_offset = 0
     gradient_accumulation_steps *= 8 # simulate 8 gpus
 
+print("====", gradient_accumulation_steps)
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
-torch.manual_seed(1337 + seed_offset)
+
+# logging
+run_name = f"nanogpt__{int(time.time())}"
+if master_process:
+    if wandb_log:
+        import wandb
+        wandb.init(
+            project=wandb_project,
+            sync_tensorboard=True,
+            config=config,
+            name=run_name,
+            save_code=True,
+        )
+writer = SummaryWriter(f"runs/{run_name}")
+writer.add_text(
+    "hyperparameters",
+    "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in config.items()])),
+)
+torch.manual_seed(50 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
@@ -132,6 +154,7 @@ if os.path.exists(meta_path):
         meta = pickle.load(f)
     meta_vocab_size = meta['vocab_size']
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+    
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
@@ -139,14 +162,17 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
+    
     # determine the vocab size we'll use for from-scratch training
     if meta_vocab_size is None:
         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
+        
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
+    
     # resume training from a checkpoint.
     ckpt_path = os.path.join(out_dir, 'ckpt.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
@@ -170,6 +196,7 @@ elif init_from == 'resume':
     best_val_loss = checkpoint['best_val_loss']
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
+    
     # initialize from OpenAI GPT-2 weights
     override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
@@ -181,6 +208,9 @@ if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
+X, Y = get_batch('train') # fetch the very first batch
+print(torchinfo.summary(model, input_data=X))
+
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
@@ -193,6 +223,7 @@ if init_from == 'resume':
 # compile the model
 if compile:
     print("compiling the model... (takes a ~minute)")
+    
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
 
@@ -230,13 +261,8 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
     return min_lr + coeff * (learning_rate - min_lr)
 
-# logging
-if wandb_log and master_process:
-    import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
-
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -245,6 +271,8 @@ while True:
 
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
+    writer.add_scalar('lr', lr, iter_num)
+
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -252,14 +280,12 @@ while True:
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        if wandb_log:
-            wandb.log({
-                "iter": iter_num,
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
-                "lr": lr,
-                "mfu": running_mfu*100, # convert to percentage
-            })
+        
+        writer.add_scalar('train/loss', losses['train'], iter_num)
+        writer.add_scalar('val/loss', losses['val'], iter_num)
+        writer.add_scalar('mfu', running_mfu*100, iter_num)
+
+
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
@@ -272,6 +298,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
+                
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
@@ -288,9 +315,11 @@ while True:
         with ctx:
             logits, loss = model(X, Y)
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
+        # print(f"iter {iter_num}, micro_step {micro_step}: loss {loss.item()}")
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
+    writer.add_scalar('loss', loss.item(), iter_num)
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)

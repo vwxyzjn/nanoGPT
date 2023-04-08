@@ -1,3 +1,12 @@
+# Costa's fork
+
+
+## Get Started
+
+```
+poetry install
+```
+
 
 # nanoGPT
 
