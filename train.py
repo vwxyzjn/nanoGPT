@@ -35,6 +35,7 @@ from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
+exp_name = "nanogpt"
 out_dir = 'out'
 eval_interval = 2000
 log_interval = 1
@@ -102,7 +103,7 @@ if master_process:
     os.makedirs(out_dir, exist_ok=True)
 
 # logging
-run_name = f"nanogpt__{int(time.time())}"
+run_name = f"{exp_name}__{int(time.time())}"
 if master_process:
     if wandb_log:
         import wandb
