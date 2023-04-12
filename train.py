@@ -78,6 +78,7 @@ dtype = 'bfloat16' # 'float32', 'bfloat16', or 'float16', the latter will auto i
 compile = True # use PyTorch 2.0 to compile the model to be faster
 amp = True
 try_flash_attn = True
+profile = False # if True, will run `cuda.synchrnoize()` for the forward and backward pass
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -308,6 +309,9 @@ while True:
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
+    if profile:
+        torch.cuda.synchronize()
+        start_time = time.time()
     for micro_step in range(gradient_accumulation_steps):
         if ddp:
             # in DDP training we only need to sync gradients at the last micro step.
@@ -332,6 +336,12 @@ while True:
     scaler.update()
     # flush the gradients as soon as we can, no need for this memory anymore
     optimizer.zero_grad(set_to_none=True)
+
+    if profile:
+        torch.cuda.synchronize()
+        end_time = time.time()
+        print('time/step', end_time - start_time, iter_num)
+        writer.add_scalar('time/step', end_time - start_time, iter_num)
 
     # timing and logging
     t1 = time.time()
