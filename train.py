@@ -287,7 +287,7 @@ while True:
         
         writer.add_scalar('train/loss', losses['train'], iter_num)
         writer.add_scalar('val/loss', losses['val'], iter_num)
-        writer.add_scalar('mfu', running_mfu*100, iter_num)
+        # writer.add_scalar('mfu', running_mfu*100, iter_num)
 
 
         if losses['val'] < best_val_loss or always_save_checkpoint:
@@ -353,6 +353,7 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        writer.add_scalar('mfu', running_mfu*100, iter_num)
     iter_num += 1
     local_iter_num += 1
 
