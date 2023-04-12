@@ -109,6 +109,9 @@ if master_process:
 run_name = f"{exp_name}__{int(time.time())}"
 if master_process:
     if wandb_log:
+        git_tag = subprocess.check_output(["git", "describe", "--tags"]).decode("ascii").strip()
+        os.environ["WANDB_TAGS"] = git_tag
+
         import wandb
         wandb.init(
             project=wandb_project,
