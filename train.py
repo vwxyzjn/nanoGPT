@@ -20,6 +20,7 @@ import os
 import time
 import math
 import pickle
+import subprocess
 from contextlib import nullcontext
 
 import numpy as np
